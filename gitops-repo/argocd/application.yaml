@@ -1,0 +1,158 @@
+# Application ArgoCD pour déploiement GitOps
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: secure-app
+  namespace: argocd
+  labels:
+    app.kubernetes.io/name: secure-app
+    app.kubernetes.io/part-of: devsecops-platform
+  annotations:
+    # Notifications et intégrations
+    notifications.argoproj.io/subscribe.on-sync-succeeded.slack: "devsecops-alerts"
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: "devsecops-alerts"
+    # Liens vers la documentation
+    link.argocd.argoproj.io/external-link: "https://gitlab.com/YOUR_USERNAME/gitops-repo"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  # Configuration du projet ArgoCD
+  project: production
+  
+  # Source GitOps
+  source:
+    repoURL: https://gitlab.com/YOUR_USERNAME/gitops-repo.git
+    targetRevision: HEAD
+    path: app
+    
+    # Plugin Helm si nécessaire (optionnel)
+    helm:
+      valueFiles:
+      - values-production.yaml
+      parameters:
+      - name: image.repository
+        value: europe-west1-docker.pkg.dev/PROJECT_ID/app-images/secure-app
+      - name: image.tag
+        value: latest
+  
+  # Destination cluster
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  
+  # Politique de synchronisation
+  syncPolicy:
+    # Création automatique du namespace
+    syncOptions:
+    - CreateNamespace=true
+    - PrunePropagationPolicy=foreground
+    - PruneLast=true
+    # Validation des ressources avant apply
+    - Validate=true
+    # Respect des finalizers
+    - RespectIgnoreDifferences=true
+    
+    # Synchronisation automatique
+    automated:
+      prune: true
+      selfHeal: true
+      allowEmpty: false
+    
+    # Retry en cas d'échec
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 10m
+  
+  # Politique de révision
+  revisionHistoryLimit: 10
+  
+  # Ignorance de certaines différences (métadonnées dynamiques)
+  ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    managedFieldsManagers:
+    - kube-controller-manager
+    jsonPointers:
+    - /spec/template/metadata/annotations
+  
+  # Health checks personnalisés
+  info:
+  - name: "Deployment Status"
+    value: "{{.status.readyReplicas}}/{{.spec.replicas}} replicas ready"
+  - name: "Image Version"
+    value: "{{index .spec.template.spec.containers 0 'image'}}"
+
+---
+# AppProject pour isolation et gouvernance
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: production
+  namespace: argocd
+  labels:
+    environment: production
+    security.level: "high"
+spec:
+  description: "Production applications with strict security policies"
+  
+  # Sources autorisées
+  sourceRepos:
+  - 'https://gitlab.com/YOUR_USERNAME/gitops-repo.git'
+  - 'https://charts.helm.sh/stable'
+  
+  # Destinations autorisées
+  destinations:
+  - namespace: production
+    server: https://kubernetes.default.svc
+  - namespace: monitoring
+    server: https://kubernetes.default.svc
+  
+  # Ressources autorisées
+  namespaceResourceWhitelist:
+  - group: ''
+    kind: ConfigMap
+  - group: ''
+    kind: Secret
+  - group: ''
+    kind: Service
+  - group: ''
+    kind: ServiceAccount
+  - group: 'apps'
+    kind: Deployment
+  - group: 'apps'
+    kind: ReplicaSet
+  - group: 'networking.k8s.io'
+    kind: NetworkPolicy
+  - group: 'networking.k8s.io'
+    kind: Ingress
+  
+  # Ressources cluster interdites (sécurité)
+  clusterResourceBlacklist:
+  - group: ''
+    kind: Namespace
+  - group: 'rbac.authorization.k8s.io'
+    kind: ClusterRole
+  - group: 'rbac.authorization.k8s.io'
+    kind: ClusterRoleBinding
+  
+  # Rôles pour accès différentiel
+  roles:
+  - name: production-admin
+    description: "Full access to production applications"
+    policies:
+    - p, proj:production:production-admin, applications, *, production/*, allow
+    - p, proj:production:production-admin, repositories, *, *, allow
+    groups:
+    - "devsecops-team"
+  
+  - name: production-readonly
+    description: "Read-only access to production applications"
+    policies:
+    - p, proj:production:production-readonly, applications, get, production/*, allow
+    - p, proj:production:production-readonly, applications, action/*, production/*, deny
+    groups:
+    - "developers"
+    - "auditors"

@@ -1,0 +1,213 @@
+# Politique Tetragon pour détection de comportements suspects
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: secure-app-behavioral-monitoring
+  namespace: production
+  labels:
+    app: secure-app
+    security.compliance/level: "defense"
+  annotations:
+    policy.description: "Monitoring comportemental pour l'application sécurisée"
+    policy.severity: "high"
+spec:
+  # Monitoring des appels système critiques
+  kprobes:
+  - call: "sys_execve"
+    syscall: true
+    args:
+    - index: 0
+      type: "string"
+    - index: 1 
+      type: "char_buff"
+      sizeArgIndex: 3
+    - index: 2
+      type: "char_buff" 
+      sizeArgIndex: 3
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values:
+        - "/bin/sh"
+        - "/bin/bash"
+        - "/usr/bin/curl"
+        - "/usr/bin/wget"
+      matchActions:
+      - action: FollowFD
+      - action: Post
+      matchCapabilities:
+      - type: Effective
+        operator: In
+        values:
+        - "CAP_SYS_ADMIN"
+    
+  # Monitoring des connexions réseau sortantes suspectes
+  - call: "tcp_connect"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "DAddr"
+        values:
+        # Blocage des IP externes non autorisées
+        - "0.0.0.0/0"
+      matchActions:
+      - action: Post
+        
+  # Surveillance des accès fichiers critiques  
+  - call: "security_file_open"
+    syscall: false
+    args:
+    - index: 0
+      type: "file"
+    - index: 1
+      type: "int"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Prefix"
+        values:
+        - "/etc/"
+        - "/root/"
+        - "/proc/"
+        - "/sys/"
+        - "/boot/"
+      - index: 1
+        operator: "Equal"
+        values:
+        - "2" # O_RDWR
+        - "1" # O_WRONLY
+      matchActions:
+      - action: Post
+        
+  # Détection de privilege escalation
+  - call: "sys_setuid"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Equal"
+        values:
+        - "0" # Tentative de devenir root
+      matchActions:
+      - action: Post
+      - action: Block # Bloquer l'action
+        
+  # Pod selector pour application de la politique
+  podSelector:
+    matchLabels:
+      app: secure-app
+      security.tetragon.io/policy: "strict"
+
+---
+# Politique pour détection de crypto-mining et malware
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: crypto-mining-detection
+  namespace: production
+  labels:
+    security.type: "threat-detection"
+spec:
+  kprobes:
+  # Détection d'activité de mining crypto
+  - call: "sys_sched_setaffinity"
+    syscall: true
+    args:
+    - index: 0
+      type: "int"
+    - index: 1
+      type: "size_t"
+    - index: 2
+      type: "char_buff"
+      sizeArgIndex: 1
+    selectors:
+    - matchActions:
+      - action: Post
+  
+  # Surveillance des processus à haute consommation CPU
+  - call: "wake_up_new_task"
+    syscall: false
+    args:
+    - index: 0
+      type: "task"
+    selectors:
+    - matchActions:
+      - action: FollowFD
+      - action: Post
+      
+  # Détection de connexions vers des pools de mining connus
+  - call: "tcp_connect"
+    syscall: false  
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "DPort"
+        values:
+        - "3333"  # Port mining commun
+        - "4444"
+        - "8080"
+        - "14444"
+      matchActions:
+      - action: Post
+      - action: Block
+        
+  podSelector:
+    matchLabels:
+      security.tetragon.io/policy: "strict"
+
+---
+# Politique de conformité pour audit défense
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: defense-compliance-audit
+  namespace: production
+  labels:
+    compliance.standard: "defense"
+    audit.level: "detailed"
+spec:
+  kprobes:
+  # Audit de tous les accès réseau
+  - call: "inet_csk_accept"
+    syscall: false
+    args:
+    - index: 0
+      type: "sock"
+    selectors:
+    - matchActions:
+      - action: Post
+        
+  # Audit des modifications de fichiers sensibles
+  - call: "security_inode_setattr"
+    syscall: false
+    args:
+    - index: 0
+      type: "file"
+    selectors:
+    - matchActions:
+      - action: Post
+        
+  # Audit des changements de permissions
+  - call: "sys_chmod"
+    syscall: true
+    args:
+    - index: 0
+      type: "string"
+    - index: 1
+      type: "int"
+    selectors:
+    - matchActions:
+      - action: Post
+        
+  podSelector: {}  # Appliqué à tous les pods du namespace

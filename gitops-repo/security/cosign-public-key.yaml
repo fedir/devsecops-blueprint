@@ -1,0 +1,129 @@
+# Template pour la clé publique Cosign (sera remplacé par la pipeline)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cosign-public-key
+  namespace: kyverno
+  labels:
+    app: cosign
+    component: verification
+    security.compliance/level: "defense"
+  annotations:
+    description: "Clé publique Cosign pour vérification des signatures d'images"
+    managed-by: "gitlab-ci"
+    rotation-policy: "per-build"
+    usage: "image-verification"
+type: Opaque
+data:
+  # Cette clé sera automatiquement remplacée par la pipeline GitLab CI
+  cosign.pub: |
+    LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUZrd0V3WUhLb1pJemowQ0FRWUlLb1pJemowREFRY0RRZ0FFVGpnZ1pHNkpxUXFmMVczRkVjbUlsbmc2SElxZgo5T3J6Wk9QSzJOUU8xajVHU2lHZFA1RzViN0dhcExsK01GV09lVXdPaWdIWGx2cHRsVlpmRTNDQmh3PT0KLS0tLS1FTkQgUFVCTElDIEtFWS0tLS0t
+  # Cette valeur est un placeholder - sera remplacée par la vraie clé publique
+  
+---
+# ConfigMap pour la politique Kyverno (référence à la clé)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cosign-verification-config
+  namespace: kyverno
+  labels:
+    app: kyverno
+    component: verification-config
+data:
+  # Configuration pour la vérification des signatures
+  verification-config.yaml: |
+    # Registries de confiance
+    trusted_registries:
+      - "europe-west1-docker.pkg.dev"
+      - "gcr.io"
+      - "registry.k8s.io"
+    
+    # Politique de signature
+    signature_policy:
+      enforce: true
+      allow_unsigned_system_images: false
+      require_cosign_signature: true
+      
+    # Namespaces exemptés (système seulement)
+    exempted_namespaces:
+      - "kube-system"
+      - "kube-public"
+      - "local-path-storage"
+      
+    # Images système autorisées sans signature
+    system_images:
+      - "registry.k8s.io/pause:*"
+      - "registry.k8s.io/coredns/coredns:*"
+      - "quay.io/cilium/tetragon:*"
+
+---
+# Secret additionnel pour l'intégration avec d'autres outils
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cosign-integration-config
+  namespace: production
+  labels:
+    app: cosign
+    component: integration
+type: Opaque
+data:
+  # Configuration pour l'intégration avec les outils de CI/CD
+  registry_config: |
+    ewogICJhdXRocyI6IHsKICAgICJldXJvcGUtd2VzdDEtZG9ja2VyLnBrZy5kZXYiOiB7CiAgICAgICJhdXRoIjogIm9hdXRoMmFjY2Vzc3Rva2VuOkdJVExBQl9UT0tFTiIKICAgIH0KICB9Cn0=
+  
+  # Metadata pour l'audit
+  signature_metadata: |
+    ewogICJzaWduZXIiOiAiZ2l0bGFiLWNpIiwKICAiY2ktcGlwZWxpbmUiOiAiYXBwbGljYXRpb24tcmVwbyIsCiAgInNpZ25hdHVyZV9hbGdvcml0aG0iOiAiRUNEU0EiLAogICJoYXNoX2FsZ29yaXRobSI6ICJTSEEYTU02IgogfQ==
+
+---
+# ServiceAccount pour Cosign operations
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cosign-verifier
+  namespace: kyverno
+  labels:
+    app: cosign
+    component: verifier
+  annotations:
+    description: "ServiceAccount pour les opérations de vérification Cosign"
+automountServiceAccountToken: true
+
+---
+# ClusterRole pour les permissions de vérification
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cosign-verifier
+  labels:
+    app: cosign
+    component: rbac
+rules:
+- apiGroups: [""]
+  resources: ["secrets", "configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cosign-verifier
+  labels:
+    app: cosign
+    component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cosign-verifier
+subjects:
+- kind: ServiceAccount
+  name: cosign-verifier
+  namespace: kyverno

@@ -1,0 +1,120 @@
+# Pipeline DevSecOps avec signature d'images
+stages:
+  - security-scan
+  - build
+  - sign
+  - deploy-manifests
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: "/certs"
+  IMAGE_NAME: ${ARTIFACT_REGISTRY}/secure-app
+  COSIGN_EXPERIMENTAL: 1
+
+# Analyse de sécurité du code source
+sast:
+  stage: security-scan
+  image: securecodewarrior/semgrep:latest
+  script:
+    - semgrep --config=auto --json --output=sast-report.json .
+  artifacts:
+    reports:
+      sast: sast-report.json
+  allow_failure: false
+
+# Scan des dépendances
+dependency-check:
+  stage: security-scan
+  image: owasp/dependency-check-action:latest
+  script:
+    - dependency-check.sh --project "secure-app" --scan . --format JSON
+  artifacts:
+    reports:
+      dependency_scanning: dependency-check-report.json
+  allow_failure: false
+
+# Détection de secrets
+secret-detection:
+  stage: security-scan
+  image: trufflesecurity/trufflehog:latest
+  script:
+    - trufflehog filesystem . --json > secret-scan.json
+    - |
+      if [ -s secret-scan.json ]; then
+        echo "Secrets détectés !"
+        cat secret-scan.json
+        exit 1
+      fi
+  allow_failure: false
+
+# Construction sécurisée
+build-image:
+  stage: build
+  image: docker:24-dind
+  services:
+    - docker:24-dind
+  before_script:
+    - echo $GITLAB_TOKEN | docker login -u oauth2accesstoken --password-stdin $ARTIFACT_REGISTRY
+  script:
+    - docker build -t $IMAGE_NAME:$CI_COMMIT_SHA .
+    - docker push $IMAGE_NAME:$CI_COMMIT_SHA
+  dependencies:
+    - sast
+    - dependency-check
+    - secret-detection
+
+# Signature Cosign
+sign-image:
+  stage: sign
+  image: gcr.io/projectsigstore/cosign:latest
+  before_script:
+    # Génération des clés Cosign éphémères
+    - cosign generate-key-pair
+    - echo $COSIGN_PRIVATE_KEY > cosign.key
+  script:
+    - echo $GITLAB_TOKEN | cosign login -u oauth2accesstoken --password-stdin $ARTIFACT_REGISTRY
+    - cosign sign --key cosign.key $IMAGE_NAME:$CI_COMMIT_SHA
+    # Sauvegarde de la clé publique pour Kyverno
+    - |
+      cat > cosign-public-key.yaml << EOF
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: cosign-public-key
+        namespace: kyverno
+      type: Opaque
+      data:
+        cosign.pub: $(cat cosign.pub | base64 -w 0)
+      EOF
+  artifacts:
+    paths:
+      - cosign-public-key.yaml
+  dependencies:
+    - build-image
+
+# Mise à jour GitOps
+update-gitops:
+  stage: deploy-manifests
+  image: alpine/git:latest
+  before_script:
+    - apk add --no-cache curl jq
+    - git config --global user.email "ci@gitlab.com"
+    - git config --global user.name "GitLab CI"
+  script:
+    # Clone du dépôt GitOps
+    - git clone https://oauth2:$GITLAB_TOKEN@gitlab.com/$GITLAB_USER/gitops-repo.git
+    - cd gitops-repo
+    
+    # Mise à jour de l'image dans le deployment
+    - |
+      sed -i "s|image: .*|image: $IMAGE_NAME:$CI_COMMIT_SHA|" app/deployment.yaml
+      
+    # Ajout de la clé publique Cosign
+    - cp ../cosign-public-key.yaml security/
+    
+    # Commit et push
+    - git add .
+    - git commit -m "Update image to $CI_COMMIT_SHA and cosign public key"
+    - git push origin main
+  dependencies:
+    - sign-image

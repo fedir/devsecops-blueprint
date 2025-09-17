@@ -1,0 +1,44 @@
+# Politique Kyverno pour vérification des signatures Cosign
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify Image Signatures with Cosign
+    policies.kyverno.io/category: Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Cette politique vérifie que toutes les images de conteneurs
+      sont signées avec Cosign avant le déploiement.
+spec:
+  validationFailureAction: enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-cosign-signature
+      match:
+        any:
+        - resources:
+            kinds:
+            - Pod
+            - Deployment
+            - StatefulSet
+            - DaemonSet
+      verifyImages:
+      - imageReferences:
+        - "europe-west1-docker.pkg.dev/*/app-images/*"
+        attestors:
+        - entries:
+          - keys:
+              publicKeys: |-
+                -----BEGIN PUBLIC KEY-----
+                # Cette clé sera remplacée par la pipeline CI
+                # avec le contenu du secret cosign-public-key
+                -----END PUBLIC KEY-----
+        mutateDigest: true
+        verifyDigest: true
+      context:
+      - name: cosign-public-key
+        configMap:
+          name: cosign-public-key
+          namespace: kyverno

@@ -1,0 +1,179 @@
+# Deployment sécurisé avec intégration Vault
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: secure-app
+  namespace: production
+  labels:
+    app: secure-app
+    version: v1
+    security.policy: "strict"
+  annotations:
+    # Annotations pour audit et compliance
+    deployment.kubernetes.io/revision: "1"
+    security.compliance/level: "defense"
+    vault.security.banzaicloud.io/vault-addr: "https://vault.internal:8200"
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: secure-app
+  template:
+    metadata:
+      labels:
+        app: secure-app
+        version: v1
+        # Labels pour Tetragon
+        security.tetragon.io/policy: "strict"
+        compliance.tetragon.io/level: "defense"
+      annotations:
+        # Intégration HashiCorp Vault
+        vault.security.banzaicloud.io/vault-role: "secure-app"
+        vault.security.banzaicloud.io/vault-path: "secret"
+        vault.security.banzaicloud.io/vault-skip-verify: "false"
+        # Injection des secrets via Vault Agent
+        vault.hashicorp.com/agent-inject: "true"
+        vault.hashicorp.com/role: "secure-app-role"
+        vault.hashicorp.com/agent-inject-secret-config: "secret/data/secure-app/config"
+        vault.hashicorp.com/agent-inject-template-config: |
+          {{- with secret "secret/data/secure-app/config" -}}
+          {
+            "database_url": "{{ .Data.data.database_url }}",
+            "api_key": "{{ .Data.data.api_key }}",
+            "debug": {{ .Data.data.debug }}
+          }
+          {{- end -}}
+        # Annotations Tetragon pour monitoring comportemental
+        tetragon.io/policy-enforce: "true"
+        tetragon.io/syscall-monitoring: "enabled"
+        tetragon.io/network-monitoring: "strict"
+        tetragon.io/file-monitoring: "enabled"
+    spec:
+      # Sécurité du Pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: secure-app-sa
+      automountServiceAccountToken: false
+      
+      containers:
+      - name: secure-app
+        image: europe-west1-docker.pkg.dev/PROJECT_ID/app-images/secure-app:latest
+        imagePullPolicy: Always
+        
+        # Configuration sécurisée du conteneur
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        
+        # Variables d'environnement pour Vault
+        env:
+        - name: PORT
+          value: "8080"
+        - name: VAULT_CONFIG_PATH
+          value: "/vault/secrets/config"
+        - name: LOG_LEVEL
+          value: "INFO"
+        
+        # Probes pour health checks
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        
+        # Ressources limitées
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        
+        # Volumes pour secrets Vault
+        volumeMounts:
+        - name: vault-secrets
+          mountPath: /vault/secrets
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp
+      
+      volumes:
+      - name: vault-secrets
+        emptyDir:
+          medium: Memory
+      - name: tmp
+        emptyDir:
+          medium: Memory
+      
+      # Tolérances et affinité pour haute disponibilité
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - secure-app
+              topologyKey: kubernetes.io/hostname
+      
+      # DNS Policy pour résolution interne
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+---
+# Service Account dédié
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: secure-app-sa
+  namespace: production
+  labels:
+    app: secure-app
+  annotations:
+    vault.security.banzaicloud.io/vault-role: "secure-app"
+automountServiceAccountToken: false
